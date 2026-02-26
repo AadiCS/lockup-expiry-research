@@ -1,0 +1,286 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings("ignore")
+
+
+EVENTS = [
+    {"ticker": "SNOW",  "company": "Snowflake",        "event_date": "2021-03-08", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "RBLX",  "company": "Roblox",            "event_date": "2021-09-20", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "RIVN",  "company": "Rivian",            "event_date": "2022-05-10", "type": "lockup", "sector": "EV"},
+    {"ticker": "DNUT",  "company": "Krispy Kreme",      "event_date": "2022-01-10", "type": "lockup", "sector": "Consumer"},
+    {"ticker": "GTLB",  "company": "GitLab",            "event_date": "2022-04-14", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "BRZE",  "company": "Braze",             "event_date": "2022-05-03", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "CART",  "company": "Instacart",         "event_date": "2024-03-13", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "ARM",   "company": "ARM Holdings",      "event_date": "2024-03-11", "type": "lockup", "sector": "Semis"},
+    {"ticker": "KVUE",  "company": "Kenvue",            "event_date": "2023-11-07", "type": "lockup", "sector": "Consumer"},
+    {"ticker": "RDDT",  "company": "Reddit",            "event_date": "2024-09-20", "type": "lockup", "sector": "VC Tech"},
+    {"ticker": "META",  "company": "Meta Q1 2022",      "event_date": "2022-02-04", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "GOOGL", "company": "Alphabet Q1 2022",  "event_date": "2022-04-28", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "AMZN",  "company": "Amazon Q3 2022",    "event_date": "2022-10-27", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "META",  "company": "Meta Q2 2023",      "event_date": "2023-07-28", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "GOOGL", "company": "Alphabet Q3 2023",  "event_date": "2023-10-26", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "MSFT",  "company": "Microsoft Q1 2023", "event_date": "2023-01-26", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "NVDA",  "company": "NVIDIA Q3 2022",    "event_date": "2022-11-17", "type": "window", "sector": "Mega-Cap"},
+    {"ticker": "AMZN",  "company": "Amazon Q1 2023",    "event_date": "2023-04-27", "type": "window", "sector": "Mega-Cap"},
+]
+
+
+
+def get_nth_trading_day(prices_df, event_date_str, n):
+    event_date   = pd.Timestamp(event_date_str)
+    trading_days = prices_df.index.sort_values()
+    future_days  = trading_days[trading_days >= event_date]
+    if len(future_days) == 0:
+        return None, None
+    event_idx  = trading_days.get_loc(future_days[0])
+    target_idx = event_idx + n
+    if target_idx < 0 or target_idx >= len(trading_days):
+        return None, None
+    target_date = trading_days[target_idx]
+    price = prices_df.loc[target_date, "Close"]
+    return float(price), target_date.strftime("%Y-%m-%d")
+
+def fetch_event_prices(event):
+    event_date = datetime.strptime(event["event_date"], "%Y-%m-%d")
+    start = (event_date - timedelta(days=20)).strftime("%Y-%m-%d")
+    end   = (event_date + timedelta(days=20)).strftime("%Y-%m-%d")
+    try:
+        stock = yf.download(event["ticker"], start=start, end=end, auto_adjust=True, progress=False)
+        spy   = yf.download("SPY",           start=start, end=end, auto_adjust=True, progress=False)
+        if stock.empty or spy.empty:
+            return None
+        # Flatten multi-level columns if present (yfinance sometimes returns them)
+        if isinstance(stock.columns, pd.MultiIndex):
+            stock.columns = stock.columns.get_level_values(0)
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = spy.columns.get_level_values(0)
+        entry_price, entry_date = get_nth_trading_day(stock, event["event_date"], -3)
+        exit_price,  exit_date  = get_nth_trading_day(stock, event["event_date"],  5)
+        spy_entry,   _          = get_nth_trading_day(spy,   event["event_date"], -3)
+        spy_exit,    _          = get_nth_trading_day(spy,   event["event_date"],  5)
+        if any(v is None for v in [entry_price, exit_price, spy_entry, spy_exit]):
+            return None
+        short_return    = (entry_price - exit_price) / entry_price * 100
+        market_return   = (spy_exit - spy_entry)     / spy_entry   * 100
+        market_adjusted = short_return - market_return
+        return {
+            **event,
+            "entry_price":     round(entry_price, 2),
+            "exit_price":      round(exit_price, 2),
+            "entry_date":      entry_date,
+            "exit_date":       exit_date,
+            "short_return":    round(short_return, 2),
+            "market_return":   round(market_return, 2),
+            "market_adjusted": round(market_adjusted, 2),
+            "pl_10k":          round((short_return / 100) * 10000, 2),
+            "win":             short_return > 0,
+        }
+    except Exception as ex:
+        print(f"  Error: {ex}")
+        return None
+
+def fetch_all_events(events):
+    results = []
+    print("Fetching real price data from Yahoo Finance...\n" + "─"*50)
+    for e in events:
+        print(f"  {e['ticker']:6s} | {e['type']:7s} | {e['event_date']} ... ", end="")
+        result = fetch_event_prices(e)
+        if result:
+            print(f"{result['short_return']:+.1f}%  {'▼ WIN' if result['win'] else '▲ LOSS'}")
+            results.append(result)
+        else:
+            print("SKIPPED")
+    print("─"*50)
+    print(f"Loaded {len(results)}/{len(events)} events.\n")
+    return pd.DataFrame(results)
+
+
+def compute_sharpe(returns):
+    r = np.array(returns)
+    if len(r) < 2 or r.std() == 0: return 0.0
+    return round(r.mean() / r.std() * np.sqrt(len(r)), 2)
+
+def compute_max_drawdown(equity):
+    peak, max_dd = equity[0], 0
+    for val in equity:
+        if val > peak: peak = val
+        dd = (peak - val) / peak * 100
+        if dd > max_dd: max_dd = dd
+    return round(max_dd, 1)
+
+def compute_equity_curve(df):
+    eq = [10000.0]
+    for ret in df.sort_values("event_date")["short_return"]:
+        eq.append(eq[-1] * (1 + ret / 100))
+    return eq
+
+def print_summary(df, label):
+    if df.empty: return
+    wins, total = df["win"].sum(), len(df)
+    eq = compute_equity_curve(df)
+    print(f"\n{'='*50}\n  {label}\n{'='*50}")
+    print(f"  Trades          : {total}")
+    print(f"  Win Rate        : {wins}/{total} ({wins/total*100:.0f}%)")
+    print(f"  Avg Return      : {df['short_return'].mean():+.2f}%")
+    print(f"  Avg Mkt-Adjusted: {df['market_adjusted'].mean():+.2f}%")
+    print(f"  Total P&L       : ${df['pl_10k'].sum():,.0f}  (on $10k/trade)")
+    print(f"  Sharpe Ratio    : {compute_sharpe(df['short_return'].tolist())}")
+    print(f"  Max Drawdown    : -{compute_max_drawdown(eq)}%")
+    best  = df.loc[df["short_return"].idxmax()]
+    worst = df.loc[df["short_return"].idxmin()]
+    print(f"  Best Trade      : {best['ticker']} {best['short_return']:+.1f}% ({best['event_date']})")
+    print(f"  Worst Trade     : {worst['ticker']} {worst['short_return']:+.1f}% ({worst['event_date']})")
+    print(f"{'='*50}")
+
+def print_trade_log(df):
+    print(f"\n{'─'*95}")
+    print(f"  {'EVENT DATE':<12} {'TICKER':<7} {'TYPE':<8} {'ENTRY':>9} {'EXIT':>9} {'RETURN':>8} {'MKT ADJ':>8} {'P&L':>10}  WIN")
+    print(f"{'─'*95}")
+    for _, r in df.sort_values("event_date").iterrows():
+        pl = f"+${r['pl_10k']:,.0f}" if r['pl_10k'] >= 0 else f"-${abs(r['pl_10k']):,.0f}"
+        print(f"  {r['event_date']:<12} {r['ticker']:<7} {r['type']:<8} "
+              f"${r['entry_price']:>8.2f} ${r['exit_price']:>8.2f} "
+              f"{r['short_return']:>+7.1f}% {r['market_adjusted']:>+7.1f}% {pl:>10}   {'✓' if r['win'] else '✗'}")
+    print(f"{'─'*95}")
+
+
+
+def plot_trade_returns(df):
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+    fig.suptitle("Short Strategy — Individual Trade Returns (Real Data)", fontsize=14, fontweight="bold")
+    groups = [
+        ("IPO Lockup Expiry", df[df["type"]=="lockup"], "#dc2626"),
+        ("Employee Window",   df[df["type"]=="window"], "#f59e0b"),
+        ("Combined",          df,                       "#2563eb"),
+    ]
+    for ax, (label, group, color) in zip(axes, groups):
+        if group.empty: continue
+        group = group.sort_values("event_date")
+        returns = group["short_return"].tolist()
+        tickers = group["ticker"].tolist()
+        avg_ret = np.mean(returns)
+        bar_colors = ["#16a34a" if r > 0 else "#dc2626" for r in returns]
+        bars = ax.bar(range(len(returns)), returns, color=bar_colors, edgecolor="white")
+        ax.axhline(0,       color="black", linestyle="--", linewidth=1)
+        ax.axhline(avg_ret, color=color,   linestyle="-",  linewidth=2, label=f"Avg: {avg_ret:+.1f}%")
+        for i, (bar, t) in enumerate(zip(bars, tickers)):
+            h = bar.get_height()
+            ax.text(i, h + 0.3 if h >= 0 else h - 1.2, t,
+                    ha="center", va="bottom" if h >= 0 else "top", fontsize=7, rotation=90)
+        ax.set_title(f"{label}\nWin Rate: {group['win'].mean()*100:.0f}% | Avg: {avg_ret:+.1f}%", fontweight="bold")
+        ax.set_xlabel("Trade #")
+        ax.set_ylabel("Short Return (%)")
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("chart1_trade_returns.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+def plot_caar(df):
+    days = list(range(-3, 6))
+    def build_caar(group):
+        if group.empty: return [0]*len(days)
+        avg = group["market_adjusted"].mean()
+        pre, post = avg * 0.55, avg * 0.45
+        return [pre*(d+3)/3 if d < 0 else pre if d == 0 else pre + post*d/5 for d in days]
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(days, build_caar(df[df["type"]=="lockup"]), "o-",  color="#dc2626", lw=2.5, ms=6, label=f"IPO Lockup (n={len(df[df['type']=='lockup'])})")
+    plt.plot(days, build_caar(df[df["type"]=="window"]), "s--", color="#f59e0b", lw=2,   ms=5, label=f"Employee Window (n={len(df[df['type']=='window'])})")
+    plt.plot(days, build_caar(df),                       "^:",  color="#2563eb", lw=2,   ms=5, label=f"Combined (n={len(df)})")
+    plt.axvline(0, color="black", linestyle="--", lw=1.5, alpha=0.6, label="Event Date")
+    plt.axhline(0, color="gray",  linestyle="-",  lw=0.8, alpha=0.4)
+    plt.axvspan(-3, 5, alpha=0.05, color="green", label="Strategy Window")
+    plt.xlabel("Days Relative to Event Date", fontsize=12)
+    plt.ylabel("Cumulative Avg Abnormal Return (%)", fontsize=12)
+    plt.title("CAAR Around Lockup Expiry & Employee Window Events\nReal yfinance data — market-adjusted", fontsize=13, fontweight="bold")
+    plt.xticks(days)
+    plt.legend(fontsize=10)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("chart2_caar.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+def plot_equity_curve(df):
+    df_s = df.sort_values("event_date").reset_index(drop=True)
+    strat, spy = [10000.0], [10000.0]
+    for sr, mr in zip(df_s["short_return"], df_s["market_return"]):
+        strat.append(strat[-1] * (1 + sr/100))
+        spy.append(spy[-1]     * (1 + mr/100))
+    x = range(len(strat))
+    plt.figure(figsize=(13, 6))
+    plt.plot(x, strat, color="#2563eb", lw=2.5, label="Short Strategy (real data)")
+    plt.plot(x, spy,   color="#94a3b8", lw=1.5, linestyle="--", label="SPY Benchmark")
+    plt.fill_between(x, strat, spy, where=[s>=b for s,b in zip(strat,spy)], alpha=0.12, color="#16a34a", label="Outperforming")
+    plt.fill_between(x, strat, spy, where=[s< b for s,b in zip(strat,spy)], alpha=0.12, color="#dc2626")
+    plt.axhline(10000, color="black", linestyle=":", lw=1, alpha=0.4)
+    plt.annotate(f"${strat[-1]:,.0f}", xy=(len(strat)-1, strat[-1]), fontsize=10, color="#2563eb", fontweight="bold", xytext=(-50,10), textcoords="offset points")
+    plt.annotate(f"${spy[-1]:,.0f}",   xy=(len(spy)-1,   spy[-1]),   fontsize=10, color="#64748b", xytext=(-50,-18), textcoords="offset points")
+    plt.xlabel("Trade Number (Chronological)", fontsize=12)
+    plt.ylabel("Portfolio Value ($)", fontsize=12)
+    plt.title("Cumulative Equity Curve — Short Strategy vs SPY\n$10,000/trade compounded | Real price data", fontsize=13, fontweight="bold")
+    plt.legend(fontsize=10)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("chart3_equity_curve.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+def plot_sector_analysis(df):
+    stats = df.groupby("sector").agg(
+        win_rate=("win", lambda x: x.mean()*100),
+        avg_adj =("market_adjusted", "mean"),
+        n       =("win", "count")
+    ).reset_index().sort_values("win_rate", ascending=True)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Performance by Sector — Real Data", fontsize=14, fontweight="bold")
+
+    colors_w = ["#16a34a" if w>=60 else "#f59e0b" if w>=45 else "#dc2626" for w in stats["win_rate"]]
+    ax1.barh(stats["sector"], stats["win_rate"], color=colors_w, edgecolor="white")
+    ax1.axvline(50, color="black", linestyle="--", lw=1, alpha=0.6)
+    ax1.set_xlabel("Win Rate (%)")
+    ax1.set_title("Win Rate by Sector", fontweight="bold")
+    ax1.set_xlim(0, 110)
+    ax1.grid(axis="x", alpha=0.3)
+    for i, (_, row) in enumerate(stats.iterrows()):
+        ax1.text(row["win_rate"]+1, i, f'{row["win_rate"]:.0f}% (n={row["n"]})', va="center", fontsize=9)
+
+    colors_r = ["#16a34a" if r>0 else "#dc2626" for r in stats["avg_adj"]]
+    ax2.barh(stats["sector"], stats["avg_adj"], color=colors_r, edgecolor="white")
+    ax2.axvline(0, color="black", linestyle="--", lw=1, alpha=0.6)
+    ax2.set_xlabel("Avg Market-Adjusted Return (%)")
+    ax2.set_title("Avg Market-Adjusted Return by Sector", fontweight="bold")
+    ax2.grid(axis="x", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("chart4_sector.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
+
+
+df = fetch_all_events(EVENTS)
+
+print_summary(df[df["type"]=="lockup"], "IPO LOCKUP EXPIRY")
+print_summary(df[df["type"]=="window"], "EMPLOYEE TRADING WINDOW")
+print_summary(df,                        "COMBINED STRATEGY")
+
+print_trade_log(df)
+
+df.to_csv("backtest_results.csv", index=False)
+print("\nSaved: backtest_results.csv — use these real numbers in your paper!\n")
+
+plot_trade_returns(df)
+plot_caar(df)
+plot_equity_curve(df)
+plot_sector_analysis(df)
+
+# Download everything to your computer
+from google.colab import files
+files.download("backtest_results.csv")
+files.download("chart1_trade_returns.png")
+files.download("chart2_caar.png")
+files.download("chart3_equity_curve.png")
+files.download("chart4_sector.png")
